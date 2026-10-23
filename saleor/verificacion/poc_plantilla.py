@@ -3,10 +3,13 @@
 Requisitos: los mismos que verificar.py (stack levantado y populatedb). Solo usa la librería estándar.
 
     cd saleor && python3 verificacion/poc_plantilla.py
+    cd saleor && python3 verificacion/poc_plantilla.py --esperar   # deja la app viva para probar a mano
 
 Deja creados los canales "poc-es" y "poc-fr", el tipo de cliente del club y tres clientes de prueba,
 para poder verlos en el panel y en DBeaver. Si se vuelve a ejecutar, los borra y los crea de nuevo.
 Levanta un servidor de webhooks en el puerto 8765 del Mac mientras dura la prueba y borra la app al terminar.
+Con --esperar no la borra hasta pulsar Intro, para poder crear checkouts con curl y mirar en core_eventdelivery
+las llamadas que hace Saleor (al borrar la app se borran en cascada). Mientras tanto imprime cada webhook recibido.
 """
 
 import http.server
@@ -17,6 +20,7 @@ import threading
 from verificar import check, gql, results, staff_token
 
 PUERTO_WEBHOOKS = 8765
+ESPERAR = "--esperar" in sys.argv
 CLUB = "club-ciclista-x"
 PAISES = {
     # canal: país, IVA, precio de la camiseta, precio del envío, idioma
@@ -61,6 +65,9 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
             premium = any(m["key"] == "premium" and m["value"] == "true" for m in user.get("metadata", []))
             body = [{"id": "premium-gratis", "name": "Envío gratis Premium", "amount": 0,
                      "currency": checkout["channel"]["currencyCode"], "maximum_delivery_days": 5}] if premium else []
+        if ESPERAR:
+            print(f"  ← webhook {self.headers.get('Saleor-Event')}: cliente {user.get('email') or 'anónimo'} → responde {json.dumps(body, ensure_ascii=False)}",
+                  flush=True)
         data = json.dumps(body).encode()
         self.send_response(200)
         self.send_header("content-type", "application/json")
@@ -75,11 +82,11 @@ class WebhookHandler(http.server.BaseHTTPRequestHandler):
 SUBSCRIPTION = """subscription {
   event {
     ... on CheckoutFilterShippingMethods {
-      checkout { user { customerType { slug } } lines { variant { product { metadata { key value } } } } }
+      checkout { user { email customerType { slug } } lines { variant { product { metadata { key value } } } } }
       shippingMethods { id }
     }
     ... on ShippingListMethodsForCheckout {
-      checkout { channel { currencyCode } user { metadata { key value } } }
+      checkout { channel { currencyCode } user { email metadata { key value } } }
     }
   }
 }"""
@@ -88,6 +95,11 @@ SUBSCRIPTION = """subscription {
 # --- Preparación ---
 
 def limpiar(staff):
+    # Por si una ejecución anterior se cortó antes de borrar su app
+    apps = gql("{ apps(first: 100) { edges { node { id name } } } }", token=staff)["data"]["apps"]["edges"]
+    for edge in apps:
+        if edge["node"]["name"] == "poc-plantilla":
+            gql("mutation($id: ID!) { appDelete(id: $id) { errors { message } } }", {"id": edge["node"]["id"]}, staff)
     for slug in [*PAISES, "poc-club-inactivo"]:
         channel = gql('{ channel(slug: "%s") { id } }' % slug, token=staff)["data"]["channel"]
         if channel:
@@ -150,20 +162,25 @@ def producto(staff, name):
                token=staff)["data"]["products"]["edges"][0]["node"]
 
 
-def crear_checkout(token, slug, variant_id, customer_id=None, staff=None):
+SHIPPING_QUERY = """query($id: ID!) { checkout(id: $id) { id subtotalPrice { gross { amount } tax { amount } }
+                     shippingMethods { id name active message price { amount } } } }"""
+
+
+def crear_checkout(token, slug, variant_id, customer_id=None, envios_antes=False):
+    """Crea un checkout y, si se indica, le une un cliente. Con envios_antes pide los envíos antes de unirlo."""
     p = PAISES[slug]
     address = {"firstName": "Ana", "lastName": "Prueba", "streetAddress1": "Calle 1", "country": p["pais"], **p["direccion"]}
     checkout = ok(gql("""mutation($c: String!, $v: ID!, $a: AddressInput!) { checkoutCreate(input: {channel: $c,
                          email: "poc@example.com", shippingAddress: $a, billingAddress: $a, lines: [{variantId: $v, quantity: 1}]})
                          { checkout { id } errors { field message } } }""",
                       {"c": slug, "v": variant_id, "a": address}, token), "checkoutCreate")["checkout"]
+    if envios_antes:
+        gql(SHIPPING_QUERY, {"id": checkout["id"]}, token)
     if customer_id:
         # Lo haría el BFF con el usuario ya identificado (cuenta Toteemi)
         ok(gql("""mutation($id: ID!, $u: ID!) { checkoutCustomerAttach(id: $id, customerId: $u) { errors { message } } }""",
                {"id": checkout["id"], "u": customer_id}, token), "checkoutCustomerAttach")
-    return gql("""query($id: ID!) { checkout(id: $id) { id subtotalPrice { gross { amount } tax { amount } }
-                  shippingMethods { id name active message price { amount } } } }""", {"id": checkout["id"]}, token
-               )["data"]["checkout"]
+    return gql(SHIPPING_QUERY, {"id": checkout["id"]}, token)["data"]["checkout"]
 
 
 # --- Comprobaciones ---
@@ -207,10 +224,10 @@ def comprobar_clubs(staff, app_token, channels):
     slug = gql('{ user(id: "%s") { customerType { slug } } }' % users["socio"], token=staff)["data"]["user"]["customerType"]["slug"]
     check("7", "El club del cliente se puede guardar en Saleor (tipo de cliente, nuevo en 3.23)", slug == CLUB, slug)
 
-    hoodie = producto(staff, "Dash Force")
-    publicar(staff, hoodie, [channels["poc-es"]], {channels["poc-es"]: 39.95})
+    zapatillas = producto(staff, "Dash Force")
+    publicar(staff, zapatillas, [channels["poc-es"]], {channels["poc-es"]: 39.95})
     ok(gql("""mutation($id: ID!) { updateMetadata(id: $id, input: [{key: "club", value: "%s"}]) { errors { message } } }""" % CLUB,
-           {"id": hoodie["id"]}, staff), "updateMetadata")
+           {"id": zapatillas["id"]}, staff), "updateMetadata")
     found = gql("""{ products(first: 10, channel: "poc-es", where: {metadata: [{key: "club", value: "%s"}]})
                    { edges { node { name } } } }""" % CLUB)["data"]["products"]["edges"]
     check("7", "La tienda puede filtrar el catálogo por club (metadata), pero la API pública también lo ve",
@@ -218,13 +235,13 @@ def comprobar_clubs(staff, app_token, channels):
 
     # ¿Se puede esconder de verdad? Despublicado o en un canal inactivo, ni siquiera nuestra app puede venderlo
     ok(gql("""mutation($id: ID!, $c: ID!) { productChannelListingUpdate(id: $id, input: {updateChannels: [{channelId: $c,
-              isPublished: false}]}) { errors { message } } }""", {"id": hoodie["id"], "c": channels["poc-es"]}, staff),
+              isPublished: false}]}) { errors { message } } }""", {"id": zapatillas["id"], "c": channels["poc-es"]}, staff),
        "productChannelListingUpdate")
     r = gql("""mutation($v: ID!) { checkoutCreate(input: {channel: "poc-es", email: "a@example.com", lines: [{variantId: $v,
-               quantity: 1}]}) { errors { code } } }""", {"v": hoodie["variants"][0]["id"]}, app_token)["data"]["checkoutCreate"]
+               quantity: 1}]}) { errors { code } } }""", {"v": zapatillas["variants"][0]["id"]}, app_token)["data"]["checkoutCreate"]
     codes = [e["code"] for e in r["errors"]]
     check("7", "Un producto despublicado no se puede comprar ni desde nuestra app", codes == ["PRODUCT_NOT_PUBLISHED"], ", ".join(codes))
-    publicar(staff, hoodie, [channels["poc-es"]], {channels["poc-es"]: 39.95})
+    publicar(staff, zapatillas, [channels["poc-es"]], {channels["poc-es"]: 39.95})
     inactive = ok(gql("""mutation { channelCreate(input: {name: "PoC club inactivo", slug: "poc-club-inactivo", currencyCode: "EUR",
                          defaultCountry: ES, isActive: false}) { channel { id } errors { message } } }""", token=staff),
                   "channelCreate")["channel"]["id"]
@@ -237,7 +254,7 @@ def comprobar_clubs(staff, app_token, channels):
 
     # Lo que sí bloquea la compra: el webhook síncrono quita los envíos si el cliente no es del club
     for key, label in [("no-socio", "no socio"), ("socio", "socio")]:
-        checkout = crear_checkout(app_token, "poc-es", hoodie["variants"][0]["id"], users[key])
+        checkout = crear_checkout(app_token, "poc-es", zapatillas["variants"][0]["id"], users[key])
         active = [m["name"] for m in checkout["shippingMethods"] if m["active"]]
         r = gql("""mutation($id: ID!, $m: ID!) { checkoutDeliveryMethodUpdate(id: $id, deliveryMethodId: $m)
                    { errors { code } } }""", {"id": checkout["id"], "m": checkout["shippingMethods"][0]["id"]}, app_token)
@@ -264,6 +281,27 @@ def comprobar_envio_premium(staff, app_token, users):
             check("3", "No Premium: no ve el envío gratis", not free,
                   ", ".join(m["name"] for m in checkout["shippingMethods"]))
 
+    # Caso real de la tienda: el cliente ve los envíos como anónimo y luego inicia sesión.
+    # Saleor guarda los envíos en caché y unir al cliente no los recalcula: hay que pedirlo con deliveryOptionsCalculate
+    checkout = crear_checkout(app_token, "poc-es", tee["variants"][0]["id"], users["premium"], envios_antes=True)
+    stale = [m["name"] for m in checkout["shippingMethods"]]
+    check("3", "Si vio los envíos antes de iniciar sesión, al unir al cliente Premium NO se recalculan",
+          "Envío gratis Premium" not in stale, ", ".join(stale))
+    gql("""mutation($id: ID!) { deliveryOptionsCalculate(id: $id) { errors { code } } }""", {"id": checkout["id"]}, app_token)
+    fresh = [m["name"] for m in gql(SHIPPING_QUERY, {"id": checkout["id"]}, app_token)["data"]["checkout"]["shippingMethods"]]
+    check("3", "Con deliveryOptionsCalculate (3.23) se recalculan y aparece el envío gratis",
+          "Envío gratis Premium" in fresh, ", ".join(fresh))
+
+
+def esperar(app_token, users):
+    print(f"""
+La app "poc-plantilla" sigue instalada y el servidor de webhooks escuchando.
+Token de la app (solo local, deja de valer al terminar):
+  {app_token}
+Clientes: socio {users['socio']} · no socio {users['no-socio']} · Premium {users['premium']}
+Cada llamada de Saleor a la app aparecerá aquí debajo.""")
+    input("\nPulsa Intro para borrar la app y terminar...\n")
+
 
 def main():
     staff = staff_token()
@@ -282,10 +320,12 @@ def main():
                       "query": SUBSCRIPTION}}, staff), "webhookCreate")
         users = comprobar_clubs(staff, app_token, channels)
         comprobar_envio_premium(staff, app_token, users)
+        print(f"\n{sum(results)}/{len(results)} comprobaciones correctas")
+        if ESPERAR:
+            esperar(app_token, users)
     finally:
         gql("mutation($id: ID!) { appDelete(id: $id) { errors { message } } }", {"id": app_id}, staff)
         server.shutdown()
-    print(f"\n{sum(results)}/{len(results)} comprobaciones correctas")
     sys.exit(0 if all(results) else 1)
 
 

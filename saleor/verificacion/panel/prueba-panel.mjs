@@ -137,6 +137,18 @@ try {
   // En el panel se hace a mano (ver promocion-manual/README.md): sus desplegables sin etiqueta
   // dejaban la prueba colgada. Aquí se crea por API con los mismos datos para poder medir el paso 4.
   const { channel: canalNuevo } = await gql(`{ channel(slug: "${SLUG}") { id } }`, {}, tokenCreate.token);
+  // Experimento (PREPARAR=canal,producto): activar el canal y/o publicar el producto antes de la promoción
+  const preparar = (process.env.PREPARAR ?? '').split(',').filter(Boolean);
+  if (preparar.includes('canal')) {
+    await gql('mutation($id: ID!) { channelUpdate(id: $id, input: {isActive: true}) { errors { message } } }',
+      { id: canalNuevo.id }, tokenCreate.token);
+  }
+  if (preparar.includes('producto')) {
+    await gql(`mutation($id: ID!, $c: ID!) { productChannelListingUpdate(id: $id, input: {updateChannels: [{channelId: $c,
+      isPublished: true, visibleInListings: true, isAvailableForPurchase: true}]}) { errors { message } } }`,
+      { id: productGid, c: canalNuevo.id }, tokenCreate.token);
+  }
+  if (preparar.length) console.log(`   (preparado antes de la promoción: ${preparar.join(', ')})`);
   const { promotionCreate } = await gql(
     `mutation($input: PromotionCreateInput!) { promotionCreate(input: $input) { errors { field message } } }`,
     {
@@ -158,7 +170,7 @@ try {
   const promo = sql(`select r.reward_value_type || ' ' || r.reward_value from discount_promotionrule r join discount_promotionrule_channels rc on rc.promotionrule_id = r.id join channel_channel c on c.id = rc.channel_id where c.slug = '${SLUG}'`);
   check('3. Promoción guardada para ese país (creada por API; en el panel es paso manual)', promo === 'percentage 20.000', promo);
 
-  // 4. ¿Se recalcula el precio rebajado del catálogo? (beat cada 30 s)
+  // 4. ¿Se recalcula el precio rebajado del catálogo? (lo lanza beat cada 30 s)
   let rebajado = '';
   for (let s = 0; s < 120; s += 10) {
     rebajado = sql(`select min(l.discounted_price_amount) from product_productvariantchannellisting l join product_productvariant v on v.id = l.variant_id join channel_channel c on c.id = l.channel_id where c.slug = '${SLUG}' and v.product_id = ${productId}`);
@@ -166,7 +178,7 @@ try {
     await page.waitForTimeout(10_000);
   }
   check('4. El precio rebajado se aplica en menos de 2 minutos', rebajado === '19.960',
-    rebajado === '19.960' ? rebajado : `sigue en ${rebajado}: revisar el servicio beat (informe 1.7)`);
+    rebajado === '19.960' ? rebajado : `sigue en ${rebajado}: ¿beat arranca con --scheduler saleor.schedulers.schedulers.PersistentScheduler? (README, problemas conocidos)`);
 } finally {
   await browser.close();
 }

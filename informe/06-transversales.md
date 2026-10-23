@@ -10,7 +10,7 @@
 
 ## 6.2 Facturación
 - **Qué hace falta:** factura legal por pedido, con numeración, datos fiscales y el idioma y los requisitos de cada país. En España, además, la normativa **VeriFactu** sobre el software de facturación (comprobar plazos y alcance con la asesoría).
-- **En Saleor:** 🟡 la **app oficial de facturas** es muy básica: PDF con plantilla fija, **solo en inglés**. **No sirve como factura legal multipaís.**
+- **En Saleor:** 🟡 Saleor guarda facturas en el pedido (`invoiceCreate`/`invoiceRequest`), pero **no las genera**: la app oficial de facturas, que era muy básica, **se eliminó del repositorio en agosto de 2024** (commit *Remove Invoices app from monorepo*). **No hay nada que sirva como factura legal multipaís.**
 - **Recomendación:** que **facture Business Central**, que es el ERP y ya tiene la localización española y la contabilidad. Saleor guarda la referencia: la tabla `invoice_invoice` tiene `external_url` (verificado), así que el conector de BC puede enlazar la factura al pedido y el cliente la ve desde su cuenta. → **Esto añade alcance al conector de BC.**
 
 ## 6.3 Idiomas
@@ -73,7 +73,7 @@ Comparativa: **Saleor Cloud Select** cuesta 1.599 $/mes (hasta 200.000 $ de GMV 
 Con un equipo de 3 personas, unos **3–4 meses** hasta la salida. No incluye la traducción del catálogo, la configuración fiscal con la asesoría ni el trabajo de diseño de los temas.
 
 ## Fuentes
-- [Saleor: cálculo de precios e impuestos](https://docs.saleor.io/developer/price-calculation) · [App de facturas](https://docs.saleor.io/developer/app-store/apps/invoices)
+- [Saleor: cálculo de precios e impuestos](https://docs.saleor.io/developer/price-calculation) · [Eliminación de la app de facturas (saleor/apps #1496)](https://github.com/saleor/apps/pull/1496)
 - [Cart2Cart: migración a Saleor](https://www.shopping-cart-migration.com/planned-shopping-carts/saleor)
 - [Precios de Saleor Cloud](https://saleor.io/pricing)
 - Esquema de la BD local de Saleor 3.23 (tablas `*translation`, `invoice_invoice`, `tax_*`)

@@ -77,7 +77,7 @@ flowchart LR
 |---|---|
 | `api` | Servidor GraphQL (ASGI/uvicorn), puerto 8000 |
 | `worker` | Celery: tareas en segundo plano (recalcular precios con descuento, enviar webhooks asíncronos, emails, exportaciones) |
-| `beat` | Planificador de Celery: lanza las tareas periódicas (por ejemplo, recalcular las promociones cada 30 s). **Debe haber uno solo** y conviene vigilarlo (ver 1.7) |
+| `beat` | Planificador de Celery: lanza las tareas periódicas (por ejemplo, recalcular las promociones cada 30 s). **Debe haber uno solo** y tiene que arrancar con el planificador de Saleor (`--scheduler saleor.schedulers.schedulers.PersistentScheduler`); ver 1.7 |
 | `db` | PostgreSQL |
 | `cache` | Valkey/Redis: caché y *broker* de la cola de Celery |
 | `dashboard` | Panel de administración (estáticos servidos con nginx), puerto 9000 |
@@ -253,7 +253,7 @@ He hecho desde el panel, con un navegador automatizado y sin usar la API, lo que
 
 **Problemas encontrados en la prueba:**
 - ⚠️ **Precio 0 € por defecto:** al marcar una variante como disponible en un país **sin escribir precio**, el panel la guarda **a 0,00 €** (verificado en la BD). Si además el producto está publicado, se vendería gratis. Hace falta una validación propia (por ejemplo, la app de precios avisa o bloquea los precios a 0 €) o una revisión antes de publicar.
-- ⚠️ **La promoción tardó en aplicarse:** se guardó al momento, pero el precio rebajado del catálogo no cambió hasta **reiniciar el planificador de tareas** (Celery beat). Después de reiniciar se aplicó en menos de un minuto (24,95 € → 19,96 €). Lo he reproducido con una segunda promoción: beat lanza el recálculo una vez y luego deja de lanzarlo, aunque está programado cada 30 s. **No he podido determinar la causa** (puede ser propio de este entorno local) y no he encontrado ninguna incidencia publicada. En producción hay que **monitorizar que el recálculo se ejecuta**, o usar Saleor Cloud, que lo opera Saleor.
+- ⚠️ **La promoción tardaba en aplicarse:** el precio rebajado no cambiaba hasta reiniciar `beat`. **La causa era nuestra configuración:** beat usaba el planificador por defecto de Celery, que se queda bloqueado cuando una tarea con planificación propia de Saleor responde "todavía no" (lo explica `saleor/schedulers/schedulers.py`). Con `--scheduler saleor.schedulers.schedulers.PersistentScheduler`, la promoción se aplica en menos de 2 minutos (verificado en 8 de 9 ejecuciones; la primera tras el cambio falló sin explicación). El `docker-compose` oficial de `saleor-platform` tiene el mismo problema.
 - ✅ **IVA:** los canales nuevos creados desde el panel se crean con **precios con IVA incluido** (`prices_entered_with_tax = true`, verificado), que es lo que necesitamos en Europa.
 - ✅ **Idioma del panel:** viene en inglés, pero trae traducciones a español, francés, alemán, italiano, polaco y portugués (verificado en los ficheros del panel).
 - La página de inicio sale vacía: las métricas de ventas necesitan instalar una app aparte ("Pulse").
@@ -274,7 +274,7 @@ He hecho desde el panel, con un navegador automatizado y sin usar la API, lo que
 | **Business Central** | 🔧 **A medida** | Webhooks de Saleor (pedidos, clientes) → conector → API REST/OData v2.0 de BC; en sentido contrario (stock, precios), webhooks o sondeo de BC → GraphQL de Saleor | **No existe conector oficial ni de la comunidad.** (BC sí trae conector nativo para Shopify, un dato relevante para la comparativa) |
 | **Inicio de sesión Toteemi** | 🔧 A medida *(por validar)* | Plugin OpenID Connect de Saleor, o BFF que valida el token de Toteemi y opera con un token de app | Necesario para "Loguéate para ver tu precio" |
 
-Otras apps oficiales mantenidas en `saleor/apps`: AvaTax (impuestos), CMS, Klaviyo, Search (Algolia), Segment, SMTP, Products feed.
+Otras apps oficiales en `saleor/apps`: AvaTax (impuestos), CMS, Klaviyo, Search (Algolia), Segment, Anonymizer, y SMTP y Products feed (estas dos, obsoletas; sus sustitutas se instalan desde el panel y Customer Emails solo funciona en Saleor Cloud).
 
 ## 1.9 Ecosistema y comunidad
 | Indicador | Dato (23/10/2026) |
@@ -339,7 +339,7 @@ Otras apps oficiales mantenidas en `saleor/apps`: AvaTax (impuestos), CMS, Klavi
 | Saldo de teemis inconsistente entre aplicar y pagar | Medio | Reservar en el backend Toteemi y volver a validar al cerrar |
 | La web corporativa se queda sin sitio al dejar WordPress | Medio | Decidir CMS (WordPress headless o un CMS headless) |
 | Operación propia (self-hosted) | Medio | Saleor Cloud, o infraestructura gestionada en AWS (RDS y ElastiCache) |
-| El recálculo de promociones se queda parado (observado en local) | Medio | Planificador (beat) como servicio aparte, alerta si los precios rebajados no se recalculan; Saleor Cloud |
+| Las promociones no se aplican por usar el planificador por defecto de beat | Medio | Arrancar beat con `--scheduler saleor.schedulers.schedulers.PersistentScheduler` y alertar si los precios rebajados no se recalculan; con Saleor Cloud lo opera Saleor |
 | Productos publicados a 0 € por despiste en el panel | Medio | Validación en la app de precios y revisión antes de publicar |
 | Facturas legales por país | Medio | Que las emita Business Central y se enlacen al pedido en Saleor (`invoice.external_url`); ver el apartado 6 |
 
@@ -351,6 +351,6 @@ Otras apps oficiales mantenidas en `saleor/apps`: AvaTax (impuestos), CMS, Klavi
 - [Docs: Webhooks síncronos](https://docs.saleor.io/developer/extending/webhooks/synchronous-events/overview) · [Extender el Dashboard con apps](https://docs.saleor.io/developer/extending/apps/extending-dashboard-with-apps)
 - [Docs: App de Stripe](https://docs.saleor.io/developer/app-store/apps/stripe/overview)
 - [Saleor limitations (Swell, competidor: tomarlo con cautela)](https://www.swell.is/content/saleor-limitations)
-- [Casos de éxito de Saleor](https://saleor.io/case-study) · [Soporte y comunidad](https://docs.saleor.io/developer/community/support) · [App de facturas](https://docs.saleor.io/developer/app-store/apps/invoices) · [Cálculo de precios e impuestos](https://docs.saleor.io/developer/price-calculation)
+- [Casos de éxito de Saleor](https://saleor.io/case-study) · [Soporte y comunidad](https://docs.saleor.io/developer/community/support) · [Eliminación de la app de facturas](https://github.com/saleor/apps/pull/1496) · [Cálculo de precios e impuestos](https://docs.saleor.io/developer/price-calculation)
 - [Business Central – visión general de integraciones](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/developer/integration-overview)
 - Repositorio de la app Toteemi (`docs/teemis.md`, `docs/modules/wallet.md`, `envs/*.json`) y tienda pública `toteemi.com`

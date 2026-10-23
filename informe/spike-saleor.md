@@ -27,8 +27,9 @@
 
 **Cómo se ha comprobado:** Saleor **3.23.44** (20/10/2026) en local con Docker, instalado desde cero el 23/10/2026. Lo marcado como **(verificado)** se repite con tres scripts del repo de la investigación (`saleor/verificacion/`):
 - `verificar.py`: esquema, API y descuento con Teemis (**22/22**).
-- `poc_plantilla.py`: PoC de esta plantilla, con ES/FR, club y envío Premium (**14/14**).
-- `panel/prueba-panel.mjs`: uso del panel con un navegador automatizado (**5/6**; el fallo es un problema real de Saleor, ver bloque 2).
+- `poc_plantilla.py`: PoC de esta plantilla, con ES/FR, club y envío Premium (**16/16**).
+- `panel/prueba-panel.mjs`: uso del panel con un navegador automatizado (**6/6**, una vez corregida la configuración del planificador; ver bloque 2).
+- El README del repositorio explica, experimento por experimento, de dónde sale cada respuesta de esta plantilla.
 
 </aside>
 
@@ -110,7 +111,7 @@ Son los casos reales con los que hay que contrastar cada bloque:
 - **Componentes de Saleor:**
   - `api`: GraphQL, sin estado.
   - `worker`: Celery.
-  - `beat`: el planificador de tareas periódicas; solo puede haber uno.
+  - `beat`: el planificador de tareas periódicas; solo puede haber uno y **tiene que arrancar con el planificador de Saleor** (`--scheduler saleor.schedulers.schedulers.PersistentScheduler`).
   - PostgreSQL.
   - Redis/Valkey: caché y cola de Celery.
   - Almacenamiento de medios en **S3 nativo** (`AWS_MEDIA_BUCKET_NAME`, verificado en `settings.py`).
@@ -120,7 +121,7 @@ Son los casos reales con los que hay que contrastar cada bloque:
 - **Varios países:** **una sola instancia**, con un canal por país.
 - **Escalado:** `api` y `worker` escalan horizontalmente. Sesiones con JWT y estado en Postgres y Redis. Postgres admite réplica de lectura (`DATABASE_URL_REPLICA`).
 - **Caché y CDN:** imágenes por CloudFront. El catálogo se cachea en la tienda (ISR de Next.js). Los precios rebajados por promociones se **precalculan**, así que leer el catálogo es barato.
-- **Jobs:** Celery para tareas y webhooks asíncronos. `beat` recalcula promociones y precios rebajados cada 30 s. ⚠️ **En local, beat deja de lanzar ese recálculo** después de la primera vez, y una promoción nueva no se aplica hasta reiniciarlo. Se ha reproducido 3 veces, la última **en una instalación nueva** (la prueba del panel espera 2 min y sigue en 24,95 €; tras `docker compose restart beat` baja a 19,96 € en menos de 10 s). No he encontrado la causa ni una incidencia publicada. En producción haría falta una **alerta si los precios rebajados no se recalculan**.
+- **Jobs:** Celery para tareas y webhooks asíncronos. `beat` recalcula promociones y precios rebajados cada 30 s. ⚠️ **Beat tiene que arrancar con el planificador de Saleor** (`--scheduler saleor.schedulers.schedulers.PersistentScheduler`). Con el de Celery por defecto, que es el que usa el `docker-compose` oficial de `saleor-platform` (`worker -B`), las tareas periódicas solo se ejecutan una vez y las promociones nuevas no se aplican. El propio código de Saleor lo explica (`saleor/schedulers/schedulers.py`). Verificado: sin `--scheduler` falló 4 de 4 veces; con él, 8 de 9 (la primera, justo tras el cambio, falló sin explicación). Conviene una **alerta si los precios rebajados no se recalculan**.
 - **Backups:** RDS con recuperación a un punto en el tiempo. Para los entornos, la configuración (canales, impuestos, envíos) se lleva como código con Saleor Configurator, de modo que staging y producción se configuran igual.
 - **Coste (orden de magnitud, sin validar con la calculadora de AWS):**
   - **Self-hosted en AWS:** ≈ **450–650 $/mes** para 1 país, **y casi igual para N**, porque un país más es configuración y no infraestructura.
@@ -131,7 +132,7 @@ Son los casos reales con los que hay que contrastar cada bloque:
   - **Self-hosted:** el equipo aplica las actualizaciones, que salen a diario o casi y suelen incluir seguridad. Ya está automatizado con la imagen y el servicio `migrate`. Las apps propias y la tienda son mantenimiento nuestro en cualquier caso.
   - **Saleor Cloud:** Saleor opera el core y da soporte. Regiones en la UE: Irlanda (eu-west-1) y Francia (eu-west-3) como secundaria.
 
-**Valoración:** 🟡 — La infraestructura es estándar y encaja en AWS. Pero son 4 piezas de Saleor más las nuestras, y el fallo del planificador obliga a monitorizarlo.
+**Valoración:** 🟡 — La infraestructura es estándar y encaja en AWS. Pero son 4 piezas de Saleor más las nuestras, y hay detalles de configuración que no son evidentes (el planificador de beat) y que conviene monitorizar.
 
 </aside>
 
@@ -163,6 +164,7 @@ Son los casos reales con los que hay que contrastar cada bloque:
 - **Cupones por rol:**
   - **Qué permite el voucher:** **no se puede limitar a un rol o segmento**. Solo admite `onlyForStaff`, un uso por cliente, uso único, países y límite de usos (verificado en el esquema). Los "tipos de cliente" nuevos de la 3.23 **no los usan ni vouchers ni promociones** (verificado).
   - **Envío gratis Premium (verificado):** nuestra app responde al webhook síncrono `SHIPPING_LIST_METHODS_FOR_CHECKOUT` y añade "Envío gratis Premium" a 0 € solo si el cliente es Premium. Un cliente no Premium no lo ve.
+    - ⚠️ **Saleor guarda los envíos en caché y no los recalcula al unir un cliente al checkout** (verificado). Si el cliente vio los envíos como anónimo y luego inicia sesión, sigue viendo los de anónimo. El BFF tiene que llamar a `deliveryOptionsCalculate` (3.23) al identificar al usuario y antes de cerrar la compra.
   - **Cupones "solo Premium":** códigos de un solo uso que genera la app para cada usuario Premium. La otra opción es que la app los quite si un no Premium los aplica, pero sería asíncrono.
 - **Combinar reglas:** de las promociones de catálogo gana la que más descuenta; las de pedido van sobre el precio ya rebajado; un voucher anula las promociones de pedido; voucher y promoción **se aplican después del precio que fija nuestra app**. ⚠️ Para que no se rompa el precio mínimo (precio base − máximo de Teemis), la app tiene que tenerlos en cuenta, o el negocio decide que Teemis y cupones no se combinan.
 - **Suscripción Premium:** ❌ **no hay suscripciones en Saleor**. La propuesta es **Stripe Billing** fuera de Saleor (alta en Stripe Checkout y gestión en el *Customer Portal*), y un webhook de Stripe que hace que la API Django cambie el rol. Hay que migrar las suscripciones activas de WooCommerce.
@@ -241,18 +243,18 @@ Son los casos reales con los que hay que contrastar cada bloque:
 | Envíos por peso y CP | Nativo en el core | Oficial | 0 € | Core 3.23.44 (20/10/2026) | ✅ Zonas, tarifas por peso y reglas de CP |
 | Cookies / RGPD | — (en la tienda: Cookiebot, CookieYes…) | Terceros | Según proveedor | — | Es cosa del frontend. Para borrar datos: **app Anonymizer** (oficial) |
 | Formularios | — (en la tienda o en el CMS) | Terceros | Según proveedor | — | No es función de un e-commerce headless |
-| Emails transaccionales / SMTP | **SMTP** | Oficial | 0 € | 19/10/2026 (2.9.6) | Plantillas por evento (pedido, cuenta, gift card…) |
+| Emails transaccionales / SMTP | **SMTP** (self-hosted) · **Customer Emails** (solo Saleor Cloud) | Oficial | 0 € | 19/10/2026 (SMTP 2.9.6) | ⚠️ SMTP está **obsoleta** (funciona, pero ya no se desarrolla). La sustituta, Customer Emails, **solo está en Saleor Cloud**. Plantillas por evento (pedido, cuenta, gift card…) |
 | Redirecciones | — (en Next.js o en la CDN) | — | 0 € | — | Las 301 de la migración van en la tienda |
 | Import / export | Export CSV nativo; import por API (`productBulkCreate`, `orderBulkCreate`, `customerBulkUpdate`…) | Oficial | 0 € | Core | ⚠️ El panel **no importa** CSV (verificado). Script propio o Saleor Configurator |
 | 2FA en el admin | — (plugin OIDC: el login va al proveedor de identidad, que pone el 2FA) | Oficial (plugin *legacy*) | 0 € + proveedor | Core | ❌ Sin 2FA propio. ⚠️ Que el 2FA del proveedor aplique al staff está **por validar** |
 | Mailchimp | — (oficial hay **Klaviyo**, y **Segment** puede reenviar a Mailchimp) | Oficial (Klaviyo, Segment) | 0 € + Segment | 19/10/2026 | ❌ Sin app de Mailchimp. A medida con webhooks o vía Segment |
-| Catálogo Facebook / Meta | **Products feed** (feed en formato Google Merchant) | Oficial | 0 € | 19/10/2026 (3.3.6) | 🟡 Meta acepta feeds en ese formato (**por validar** con nuestro catálogo) |
+| Catálogo Facebook / Meta | **Products feed** (feed en formato Google Merchant), sustituida por la app **Google Merchant Center** | Oficial | 0 € | 19/10/2026 (Products feed 3.3.6) | ⚠️ Products feed está **obsoleta**. No he podido confirmar si la nueva funciona fuera de Cloud. 🟡 Meta acepta feeds en formato Google Merchant (**por validar** con nuestro catálogo) |
 
 <aside>
 ✍️
 
 **Hallazgos:**
-- **Marketplace:** **pequeño**. Las apps oficiales están en el monorepo `saleor/apps` (163 ⭐, 82 issues abiertos, todas publicadas el 19/10/2026): Stripe, AvaTax, CMS, Klaviyo, Search (Algolia), Segment, SMTP, Products feed, **Anonymizer** y NP Atobarai (pagos en Japón). De terceros apenas hay. Comparado con WooCommerce, casi todo lo que hoy es un plugin aquí es **desarrollo propio o un servicio externo**.
+- **Marketplace:** **pequeño**. Las apps oficiales están en el monorepo `saleor/apps` (163 ⭐, 82 issues abiertos, todas publicadas el 19/10/2026): Stripe, AvaTax, CMS, Klaviyo, Search (Algolia), Segment, SMTP, Products feed, **Anonymizer** y NP Atobarai (pagos en Japón). De terceros apenas hay. ⚠️ **SMTP y Products feed están obsoletas** (lo dicen sus README) y las sustitutas no están en el repositorio público: **Customer Emails solo funciona en Saleor Cloud**. La tendencia es que las apps nuevas salgan primero, o solo, para Cloud. La app oficial de **facturas se eliminó** del repositorio en agosto de 2024. Comparado con WooCommerce, casi todo lo que hoy es un plugin aquí es **desarrollo propio o un servicio externo**.
 - **Calidad y compatibilidad:** las oficiales las mantiene Saleor, se publican a la vez y declaran qué versión del core necesitan (Stripe pide la 3.23). Se instalan desde el panel con un manifiesto.
 - **Riesgo de dependencia:** **bajo**. Una app es un servicio aparte que habla por la API pública: si se abandona, se puede forkear o rehacer sin tocar el core. Con Saleor Cloud las oficiales vienen alojadas; en self-hosted hay que desplegarlas nosotros (son Next.js).
 
@@ -267,12 +269,12 @@ Son los casos reales con los que hay que contrastar cada bloque:
 
 | Integración | Cómo (plugin oficial / comunidad / a medida) | Esfuerzo aprox. | Notas |
 | --- | --- | --- | --- |
-| Stripe: pago único, recurrente, 3DS y métodos locales por país | **App oficial Stripe** (pago único con Payment Element: 3DS y los métodos activados en Stripe por país). Recurrente: **Stripe Billing fuera de Saleor** | Bajo (pago único) + medio (Billing) | Configuración por canal. Limitaciones: no usa Stripe Checkout, una sola captura por autorización y la configuración no se edita (se recrea). ⏳ Pago de prueba **pendiente** (faltan claves de test) |
+| Stripe: pago único, recurrente, 3DS y métodos locales por país | **App oficial Stripe** para el pago único. Solo admite estos métodos (documentación): **tarjeta, Apple Pay, Google Pay, Klarna, PayPal, SEPA Direct Debit, ACH y Link**. No aparecen métodos locales como iDEAL o Bancontact. El **3DS** lo menciona la ficha de la app, no la documentación técnica (**por validar** en la PoC de pago). Recurrente: **Stripe Billing fuera de Saleor** | Bajo (pago único) + medio (Billing) | Configuración por canal. Limitaciones: no usa Stripe Checkout, una sola captura por autorización y la configuración no se edita (se recrea). ⏳ Pago de prueba **pendiente** (faltan claves de test) |
 | Business Central (sincronización de facturas) | **A medida**: webhooks de pedido → conector → API de BC. BC emite la factura con su serie por país y el conector la enlaza en Saleor (`invoiceCreate` con número y URL) | Alto (4–6 semanas-persona con pedidos, clientes, stock y facturas) | No hay conector oficial ni de la comunidad. BC sí tiene conector nativo con Shopify |
 | API Toteemi (Django): alta, anonimización, reset password, dirección de facturación | **A medida**, todo por GraphQL con un token de app: `customerCreate`/`customerUpdate`/`customerDelete`, `requestPasswordReset`, `addressCreate`/`addressUpdate`, y anonimizar con la **app Anonymizer** o su misma lógica | Medio | Verificado en el esquema. Si el login va con la cuenta Toteemi, el reset de contraseña de Saleor sobra |
 | API Toteemi (Django): saldo y consumo de Teemis | **A medida**: app de precios (lee el saldo y sobrescribe precios) más webhooks `ORDER_CREATED`/`ORDER_FULLY_PAID`/`ORDER_REFUNDED` → `SPENT_STORE` / `REFUND` | Alto (4–6 semanas-persona con precio Premium y la extensión del panel) | PoC verificada. Idempotente por pedido |
 | Identidad de usuario compartida con la app | **Plugin OIDC** (si la API Django actúa como proveedor OpenID) o un BFF que valida el token de Toteemi y opera con un token de app | Medio (1–2 semanas-persona) | ⏳ Por validar con el equipo de la API |
-| Emails transaccionales y Mailchimp | **App SMTP** (oficial) para los transaccionales. Mailchimp a medida o vía **Segment** | Bajo + medio | Oficial hay Klaviyo |
+| Emails transaccionales y Mailchimp | **App SMTP** (oficial pero obsoleta; en Cloud, Customer Emails) para los transaccionales. Mailchimp a medida o vía **Segment** | Bajo + medio | Oficial hay Klaviyo |
 | Sentry | **Nativo** (`SENTRY_DSN`) en core y worker, más el SDK en la tienda y las apps | Bajo | Verificado en `settings.py` |
 | Mixpanel / Meta pixel | En la tienda (scripts del cliente). Del lado del servidor, la **app Segment** reenvía los eventos de pedido | Bajo | — |
 | Medios en S3 / CDN | **Nativo** (`AWS_MEDIA_BUCKET_NAME`) + CloudFront | Bajo | Hoy las imágenes ya están en S3 eu-west-1 |
@@ -282,7 +284,7 @@ Son los casos reales con los que hay que contrastar cada bloque:
 
 **Hallazgos:**
 - **Mecanismo:** webhooks firmados (JWS) de dos tipos:
-  - **Asíncronos:** salen por Celery a HTTP o **SQS**. Se reintentan **5 veces con espera exponencial** desde 10 s y quedan registrados en `core_eventdelivery` (verificado en el código).
+  - **Asíncronos:** salen por Celery a HTTP o **SQS**. Se reintentan **5 veces con espera exponencial** desde 10 s (verificado en el código). En `core_eventdelivery` **solo quedan las entregas que fallan**: las que salen bien se borran (`clear_successful_delivery`, verificado en el código), así que para tener un historial de llamadas hay que mirar las trazas (Jaeger u otro destino de OpenTelemetry) o registrarlas en la app.
   - **Síncronos:** timeout de 18 s.
 - **Idempotencia:** la entrega es *al menos una vez*, así que el receptor (API Django, conector de BC) tiene que ser idempotente.
 - ⚠️ **Hallazgo de la PoC:** un webhook síncrono **se ignora sin avisar** si la app no tiene el permiso que pide ese evento (por ejemplo, `MANAGE_SHIPPING` para listar envíos). Hay que documentarlo en cada app.
@@ -327,17 +329,18 @@ Hay **dos dimensiones de multitenant** que tienen que funcionar a la vez: **paí
 **Hallazgos — País** (PoC `poc_plantilla.py`, verificado):
 - **Concepto:** el **canal**; un canal por país.
   - **Desde el panel:** 3 clics, con la moneda rellenada sola y una lista guiada de lo que falta (almacén, envíos, pagos, impuestos).
-  - ⚠️ **Por API:** el canal nace **inactivo** si no se indica `isActive`.
+  - ⚠️ **Un canal nuevo nace inactivo**, por API (si no se indica `isActive`) y también desde el panel (verificado). Hay que activarlo antes de vender.
 - **Impuestos:**
   - La configuración es por canal: precios con IVA incluido, cálculo con tipos fijos o con app.
   - Los **tipos son por país y por clase de producto**.
   - PoC: ES 24,95 € con 4,33 € de IVA (21 %); FR 26,95 € con 4,49 € de IVA (20 %).
+  - ⚠️ Los tipos reducidos por clase de producto de la BD local (por ejemplo, alimentación al 10 % en FR) son **datos de ejemplo de `populatedb`**, no los tipos legales. Los de nutrición, ropa, inscripciones o productos digitales hay que configurarlos con la asesoría.
   - OSS: el informe sale de los pedidos por país (exportación o BC). Hay que validarlo con la asesoría.
 - **Precio y moneda:** un precio por variante y canal, y **una moneda por canal**, sin conversión. En la eurozona no es problema.
 - **Idioma:**
   - **Catálogo:** 14 entidades traducibles (verificado; la PoC FR devuelve "T-shirt Monospace").
   - **Interfaz de la tienda:** es nuestra (i18n de Next.js).
-  - **Emails:** plantillas de la app SMTP.
+  - **Emails:** plantillas de la app de emails (SMTP en self-hosted, Customer Emails en Cloud).
   - **Panel:** en español, francés, alemán, italiano, polaco y portugués.
 - **Pagos y envíos:**
   - **Pagos:** la configuración de Stripe es por canal.
@@ -356,6 +359,7 @@ Hay **dos dimensiones de multitenant** que tienen que funcionar a la vez: **paí
 - **Lo que sí funciona:**
   1. **Mostrar:** la tienda filtra el catálogo por club con `metadata` (filtro con índice GIN). La API pública también lo ve, así que esto solo decide lo que se enseña.
   2. **Bloquear la compra (verificado):** nuestra app responde al webhook síncrono `CHECKOUT_FILTER_SHIPPING_METHODS` y **quita todos los envíos** si el checkout lleva un producto de club y el cliente no es socio. No puede elegir envío (`DELIVERY_METHOD_NOT_APPLICABLE`) y por tanto no puede cerrar la compra. Un socio compra con normalidad.
+     - ⚠️ **Saleor guarda los envíos en caché y no los recalcula al unir un cliente al checkout** (verificado). Si el cliente vio los envíos como anónimo y luego inicia sesión como socio, sigue bloqueado; y quien deja de ser socio con el carrito abierto conserva lo calculado. El BFF tiene que llamar a `deliveryOptionsCalculate` (3.23) al identificar al usuario y antes de cerrar la compra.
      - ⚠️ Solo sirve para productos **con envío**. Para inscripciones o productos digitales haría falta revisar el pedido al crearse (`ORDER_CREATED`) y cancelarlo.
 - **Precio por club:** la misma app de precios (precio sobrescrito, como con Teemis o Premium).
 - **País × club:** el país es el canal y el club es una regla de nuestra app dentro de cada canal, así que no se multiplican los canales. ⚠️ Un canal por país y club se descarta: no esconde nada (ver arriba) y 6 países × N clubs se vuelve inmanejable.
@@ -391,7 +395,7 @@ Hay **dos dimensiones de multitenant** que tienen que funcionar a la vez: **paí
 - **Crecimiento:**
   - Por cada país: `variantes × canales` filas de precio y `productos × canales` filas de publicación (5.000 variantes × 20 países = 100.000 filas, poco para Postgres), más traducciones `entidades × idiomas`.
   - El club no añade filas (solo metadata).
-  - Lo que crece de verdad son pedidos, checkouts y `core_eventdelivery` (los webhooks enviados).
+  - Lo que crece de verdad son pedidos y checkouts. `core_eventdelivery` solo guarda los webhooks que fallan.
 - **Índices (verificado):**
   - Únicos por `(variant_id, channel_id)` y `(product_id, channel_id)`, más índices por `channel_id`.
   - **GIN en `metadata`** de producto y pedido, con lo que el filtro por club tiene índice.
@@ -429,11 +433,11 @@ Hay **dos dimensiones de multitenant** que tienen que funcionar a la vez: **paí
 | Bloque | Valoración | Comentario corto |
 | --- | --- | --- |
 | 1 · Arquitectura de código | 🟢 | Apps desacopladas del core; actualizar no rompe nuestro código; Sentry y OpenTelemetry nativos |
-| 2 · Infraestructura | 🟡 | Estándar y encaja en AWS, pero son 4 piezas de Saleor más las nuestras; el recálculo de promociones se paró en local y hay que vigilarlo |
+| 2 · Infraestructura | 🟡 | Estándar y encaja en AWS, pero son 4 piezas de Saleor más las nuestras; beat necesita el planificador de Saleor (si no, las promociones no se aplican) |
 | 3 · Personalización funcional | 🟡 | Teemis viable y verificado; Premium (Stripe Billing), cupones por rol y packs son desarrollo propio |
 | 4 · UI y CMS | 🟡 | Tienda 100 % nuestra (control total, más trabajo); hace falta un CMS aparte para el contenido |
 | 5 · Plugins / apps | 🟡 | Pocas apps (unas 10 oficiales); suscripciones, packs, wishlist, Mailchimp y 2FA no tienen app |
-| 6 · Integraciones | 🟡 | Stripe, SMTP, Sentry y S3 de serie; Business Central, Teemis e identidad a medida |
+| 6 · Integraciones | 🟡 | Stripe (con métodos limitados), emails, Sentry y S3 de serie; Business Central, Teemis e identidad a medida |
 | 7 · Multitenant (país y club) | 🟢 / 🟡 | País de serie (canales); club solo con nuestra app y con un hueco en productos sin envío |
 | 8 · Base de datos | 🟢 | PostgreSQL, multipaís por columna, índices adecuados, metadata para datos propios |
 - **Esfuerzo estimado de la migración (días):** ≈ **145–220 días-persona** (29–44 semanas-persona), es decir, unos 3–4 meses con 3 personas. Lo más caro: tienda y checkout (40–60), Business Central (20–30), app de precios con Teemis, Premium y club (20–30), CMS (15–25). Es una estimación orientativa que no incluye traducir el catálogo ni el diseño.
@@ -443,8 +447,9 @@ Hay **dos dimensiones de multitenant** que tienen que funcionar a la vez: **paí
   2. Los clubs y los productos solo Premium no se pueden ocultar en Saleor: la compra solo se bloquea por envíos, y los productos sin envío requieren cancelar después.
   3. El precio mínimo se puede romper al combinar Teemis con cupones o promociones.
   4. Migrar las suscripciones Premium a Stripe Billing.
-  5. El recálculo de promociones se paró en local.
+  5. Configuración poco evidente de Saleor: con el planificador de beat por defecto las promociones no se aplican (resuelto con `--scheduler`, pero hay que vigilarlo).
   6. Productos publicados a 0 € por un despiste en el panel.
+  7. Los envíos calculados por nuestra app se quedan en caché al cambiar el cliente del checkout: si el BFF no fuerza el recálculo, las reglas de club y Premium pueden aplicarse con datos viejos.
 - **Recomendación:** ⚠️ **seguir con reservas**. Técnicamente cubre el país de serie y el caso crítico (Teemis en el checkout) con un mecanismo oficial, y no ata al proveedor. Pero casi todo lo propio de Toteemi (Premium, clubs, cupones por rol, packs, BC) es desarrollo propio, y el esfuerzo es alto. Compensa si se valora tener el control total y si el equipo puede mantener la tienda y 2 o 3 servicios propios. Hay que compararlo con Medusa y Shopify Plus antes de decidir.
 
 ## Dudas abiertas
@@ -460,7 +465,7 @@ Hay **dos dimensiones de multitenant** que tienen que funcionar a la vez: **paí
 9. **Alojamiento:** ¿self-hosted en EKS (más operación) o Saleor Cloud (desde 1.599 $/mes, UE en Irlanda)?
 10. **Stripe:** hacen falta claves de test para la PoC de pago.
 11. **2FA del staff:** ¿el 2FA del proveedor de identidad aplica al panel con el plugin OIDC? Hay que probarlo.
-12. **Planificador de Saleor:** ¿el parón del recálculo de promociones ocurre también fuera de local? Probar en staging o preguntar en el Discord de Saleor.
+12. **Planificador de Saleor:** con `--scheduler` funcionó en 8 de 9 pruebas. La que falló no tiene explicación: ¿pasa también en staging? Si se repite, preguntar en el Discord de Saleor.
 13. **Referencia multisite:** no he encontrado `US/in_progress/US_apertura_internacional.md` en los repos a los que tengo acceso. ¿Dónde está?
 
 **Fuentes:** [Saleor (GitHub)](https://github.com/saleor/saleor) · [Apps oficiales](https://github.com/saleor/apps) · [Precios de Saleor Cloud](https://saleor.io/pricing) · [Regiones de Saleor Cloud](https://docs.saleor.io/cloud/regions) · [Despliegue en Kubernetes](https://docs.saleor.io/setup/deploy-kubernetes) · [Plugin OpenID Connect](https://docs.saleor.io/developer/app-store/plugins/oidc) · [Canales](https://docs.saleor.io/developer/channels/overview) · [Descuentos](https://docs.saleor.io/developer/discounts/overview) · [Precio de línea a medida](https://docs.saleor.io/docs/3.x/developer/checkout/lines) · [Webhooks síncronos](https://docs.saleor.io/developer/extending/webhooks/synchronous-events/overview) · [App de Stripe](https://docs.saleor.io/developer/app-store/apps/stripe/overview) · [App de facturas](https://docs.saleor.io/developer/app-store/apps/invoices) · [Integraciones de Business Central](https://learn.microsoft.com/en-us/dynamics365/business-central/dev-itpro/developer/integration-overview)

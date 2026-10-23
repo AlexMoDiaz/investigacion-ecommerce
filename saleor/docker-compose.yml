@@ -54,11 +54,12 @@ services:
         condition: service_started
 
   # Planificador de tareas periódicas (cada 30 s recalcula promociones y precios rebajados).
-  # Va aparte y no con "worker -B": embebido en el worker se quedó parado en las pruebas
-  # y las promociones nuevas no se aplicaban hasta reiniciar.
+  # Hay que usar el planificador de Saleor (--scheduler): con el de Celery por defecto, las tareas
+  # con planificación propia de Saleor que "no tocan" bloquean al resto y todo se ejecuta solo una vez
+  # (está explicado en saleor/schedulers/schedulers.py). Va aparte del worker para poder reiniciarlo solo.
   beat:
     <<: *saleor-backend
-    command: celery -A saleor --app=saleor.celeryconf:app beat --loglevel=info
+    command: celery -A saleor --app=saleor.celeryconf:app beat --scheduler saleor.schedulers.schedulers.PersistentScheduler --loglevel=info
     restart: unless-stopped
     depends_on:
       migrate:
