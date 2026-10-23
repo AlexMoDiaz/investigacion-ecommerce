@@ -1,0 +1,11 @@
+{
+  "name": "prueba-panel-saleor",
+  "private": true,
+  "type": "module",
+  "scripts": {
+    "prueba": "node prueba-panel.mjs"
+  },
+  "dependencies": {
+    "playwright": "1.55.0"
+  }
+}

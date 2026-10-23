@@ -1,0 +1,23 @@
+# Se suma al docker-compose.yml principal solo cuando se abre el Dev Container.
+# Ojo: las rutas se resuelven desde la carpeta del primer compose (saleor/), no desde .devcontainer/.
+# Añade un contenedor "workspace" en la misma red que Saleor, con Node (para apps de Saleor)
+# y psql, para poder hablar con api:8000 y db:5432 por nombre de servicio.
+
+services:
+  workspace:
+    image: mcr.microsoft.com/devcontainers/typescript-node:1-22-bookworm
+    command: sleep infinity
+    volumes:
+      - ..:/workspaces/investigacion-ecommerce:cached
+    networks:
+      - saleor-backend-tier
+    env_file: .env
+    environment:
+      - SALEOR_API_URL=http://api:8000/graphql/
+      - PGHOST=db
+      - PGUSER=saleor
+      - PGPASSWORD=saleor
+      - PGDATABASE=saleor
+    depends_on:
+      api:
+        condition: service_started

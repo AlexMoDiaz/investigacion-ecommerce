@@ -1,0 +1,132 @@
+# Saleor en local para la investigación de e-commerce (ACID TANGO).
+# Basado en github.com/saleor/saleor-platform, con versiones fijadas y migraciones automáticas.
+# Solo para desarrollo: no usar en producción.
+
+name: saleor-local
+
+x-saleor-backend: &saleor-backend
+  image: ghcr.io/saleor/saleor:${SALEOR_VERSION:-3.23}
+  env_file: .env
+  networks:
+    - saleor-backend-tier
+  volumes:
+    # volumen compartido entre api y worker para las imágenes de producto
+    - saleor-media:/app/media
+
+services:
+  # Aplica las migraciones de Django y termina. api y worker esperan a que acabe bien.
+  migrate:
+    <<: *saleor-backend
+    command: python3 manage.py migrate
+    restart: "no"
+    depends_on:
+      db:
+        condition: service_healthy
+
+  api:
+    <<: *saleor-backend
+    ports:
+      - "127.0.0.1:8000:8000"
+    restart: unless-stopped
+    stdin_open: true
+    tty: true
+    environment:
+      - DASHBOARD_URL=http://localhost:9000/
+      - ALLOWED_HOSTS=localhost,127.0.0.1,api
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      cache:
+        condition: service_started
+      jaeger:
+        condition: service_started
+
+  worker:
+    <<: *saleor-backend
+    command: celery -A saleor --app=saleor.celeryconf:app worker --loglevel=info
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      cache:
+        condition: service_started
+      mailpit:
+        condition: service_started
+
+  # Planificador de tareas periódicas (cada 30 s recalcula promociones y precios rebajados).
+  # Va aparte y no con "worker -B": embebido en el worker se quedó parado en las pruebas
+  # y las promociones nuevas no se aplicaban hasta reiniciar.
+  beat:
+    <<: *saleor-backend
+    command: celery -A saleor --app=saleor.celeryconf:app beat --loglevel=info
+    restart: unless-stopped
+    depends_on:
+      migrate:
+        condition: service_completed_successfully
+      cache:
+        condition: service_started
+      mailpit:
+        condition: service_started
+
+  dashboard:
+    image: ghcr.io/saleor/saleor-dashboard:${SALEOR_VERSION:-3.23}
+    ports:
+      - "127.0.0.1:9000:80"
+    restart: unless-stopped
+
+  db:
+    image: postgres:15-alpine
+    ports:
+      # expuesto en el host para conectarse con DBeaver
+      - "127.0.0.1:${POSTGRES_HOST_PORT:-5432}:5432"
+    restart: unless-stopped
+    networks:
+      - saleor-backend-tier
+    volumes:
+      - saleor-db:/var/lib/postgresql/data
+    environment:
+      - POSTGRES_USER=${POSTGRES_USER:-saleor}
+      - POSTGRES_PASSWORD=${POSTGRES_PASSWORD:-saleor}
+      - POSTGRES_DB=${POSTGRES_DB:-saleor}
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U $${POSTGRES_USER} -d $${POSTGRES_DB}"]
+      interval: 5s
+      timeout: 5s
+      retries: 10
+
+  # Valkey es un fork de Redis compatible: lo usa Saleor como caché y como broker de Celery.
+  cache:
+    image: valkey/valkey:8.1-alpine
+    restart: unless-stopped
+    networks:
+      - saleor-backend-tier
+    volumes:
+      - saleor-cache:/data
+
+  jaeger:
+    image: jaegertracing/jaeger:2.11.0
+    ports:
+      - "127.0.0.1:16686:16686"
+    restart: unless-stopped
+    networks:
+      - saleor-backend-tier
+    volumes:
+      - type: tmpfs
+        target: /tmp
+
+  mailpit:
+    image: axllent/mailpit:v1.27
+    ports:
+      - "127.0.0.1:8025:8025" # web para ver los emails que manda Saleor
+    restart: unless-stopped
+    networks:
+      - saleor-backend-tier
+
+volumes:
+  saleor-db:
+  saleor-cache:
+  saleor-media:
+
+networks:
+  saleor-backend-tier:
+    driver: bridge

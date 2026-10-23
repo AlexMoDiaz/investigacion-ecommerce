@@ -1,0 +1,26 @@
+{
+  "name": "Saleor local (investigación e-commerce)",
+  "dockerComposeFile": ["../docker-compose.yml", "docker-compose.devcontainer.yml"],
+  "service": "workspace",
+  "runServices": ["db", "cache", "migrate", "api", "worker", "beat", "dashboard", "jaeger", "mailpit", "workspace"],
+  "workspaceFolder": "/workspaces/investigacion-ecommerce",
+  "shutdownAction": "stopCompose",
+  "forwardPorts": [8000, 9000, 5432, 8025, 16686],
+  "portsAttributes": {
+    "8000": { "label": "Saleor API (GraphQL)" },
+    "9000": { "label": "Saleor Dashboard" },
+    "5432": { "label": "Postgres (DBeaver)" },
+    "8025": { "label": "Mailpit" },
+    "16686": { "label": "Jaeger" }
+  },
+  "postCreateCommand": "sudo apt-get update && sudo apt-get install -y --no-install-recommends postgresql-client && npm i -g pnpm",
+  "customizations": {
+    "vscode": {
+      "extensions": [
+        "GraphQL.vscode-graphql",
+        "ckolkman.vscode-postgres",
+        "ms-azuretools.vscode-docker"
+      ]
+    }
+  }
+}
