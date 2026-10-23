@@ -49,7 +49,8 @@ for (const { node } of promotions.edges) {
 }
 
 const browser = await chromium.launch();
-const page = await (await browser.newContext({ viewport: { width: 1440, height: 1000 } })).newPage();
+// Ventana ancha: la tabla de variantes tiene 230 px por canal y con muchos canales el último quedaría fuera
+const page = await (await browser.newContext({ viewport: { width: 2600, height: 1000 } })).newPage();
 // El panel pregunta "¿salir sin guardar?" al navegar; se acepta para que la prueba no se quede colgada
 page.on('dialog', (dialog) => dialog.accept());
 const captura = (nombre) => page.screenshot({ path: `capturas/${nombre}.png`, fullPage: true });

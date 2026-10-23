@@ -1,7 +1,7 @@
 """Repite las comprobaciones marcadas como "verificado en local" en informe/01-saleor.md.
 
 Requisitos: el stack de saleor/ levantado y `populatedb --createsuperuser` ejecutado
-(ver saleor/README.md). Solo usa la librería estándar de Python.
+(ver README.md en la raíz). Solo usa la librería estándar de Python.
 
     cd saleor && python3 verificacion/verificar.py
 
@@ -131,10 +131,12 @@ def check_api_schema():
 
 def first_variant(staff, shippable):
     edges = gql('{ productVariants(first: 100, channel: "%s") { edges { node { id name '
-                'pricing { price { gross { amount } } } product { name productType { isShippingRequired } } } } } }'
+                'pricing { onSale price { gross { amount } } } product { name productType { isShippingRequired } } } } } }'
                 % CHANNEL, token=staff)["data"]["productVariants"]["edges"]
+    # Sin promoción: populatedb crea promociones al azar y se aplicarían encima del precio que fija la app
     return next(e["node"] for e in edges
-                if e["node"]["product"]["productType"]["isShippingRequired"] == shippable and e["node"]["pricing"])
+                if e["node"]["product"]["productType"]["isShippingRequired"] == shippable
+                and e["node"]["pricing"] and not e["node"]["pricing"]["onSale"])
 
 
 def create_checkout(token, variant_id):
@@ -155,9 +157,20 @@ def override_price(token, checkout, price, reason):
                {"id": checkout["id"], "l": checkout["lines"][0]["id"], "p": price, "r": reason}, token)
 
 
-def check_teemis_poc():
+def staff_token():
+    """Comprueba que el stack responde y que hay datos de ejemplo; devuelve el token del admin."""
+    try:
+        token = gql('mutation { tokenCreate(email: "%s", password: "%s") { token } }' % ADMIN)["data"]["tokenCreate"]["token"]
+    except OSError:
+        sys.exit("No se puede conectar a http://localhost:8000. ¿Está levantado el stack? (cd saleor && docker compose up -d)")
+    if not token:
+        sys.exit("No existe el usuario admin@example.com: faltan los datos de ejemplo.\n"
+                 "  cd saleor && docker compose exec api python3 manage.py populatedb --createsuperuser")
+    return token
+
+
+def check_teemis_poc(staff):
     print("\n## Prueba de concepto de teemis (1.6)")
-    staff = gql('mutation { tokenCreate(email: "%s", password: "%s") { token } }' % ADMIN)["data"]["tokenCreate"]["token"]
     created = gql('mutation { appCreate(input: {name: "verificacion-teemis", permissions: [HANDLE_CHECKOUTS]}) '
                   '{ authToken app { id } } }', token=staff)["data"]["appCreate"]
     app_token, app_id = created["authToken"], created["app"]["id"]
@@ -194,13 +207,10 @@ def check_teemis_poc():
 
 
 def main():
-    try:
-        gql("{ shop { name } }")
-    except OSError:
-        sys.exit("No se puede conectar a http://localhost:8000. ¿Está levantado el stack? (cd saleor && docker compose up -d)")
+    staff = staff_token()
     check_schema()
     check_api_schema()
-    check_teemis_poc()
+    check_teemis_poc(staff)
     ok = sum(results)
     print(f"\n{ok}/{len(results)} comprobaciones correctas")
     sys.exit(0 if ok == len(results) else 1)

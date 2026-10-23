@@ -14,7 +14,7 @@ import json
 import sys
 import threading
 
-from verificar import ADMIN, check, gql, results
+from verificar import check, gql, results, staff_token
 
 PUERTO_WEBHOOKS = 8765
 CLUB = "club-ciclista-x"
@@ -266,14 +266,9 @@ def comprobar_envio_premium(staff, app_token, users):
 
 
 def main():
-    try:
-        gql("{ shop { name } }")
-    except OSError:
-        sys.exit("No se puede conectar a http://localhost:8000. ¿Está levantado el stack? (cd saleor && docker compose up -d)")
+    staff = staff_token()
     server = http.server.ThreadingHTTPServer(("0.0.0.0", PUERTO_WEBHOOKS), WebhookHandler)
     threading.Thread(target=server.serve_forever, daemon=True).start()
-
-    staff = gql('mutation { tokenCreate(email: "%s", password: "%s") { token } }' % ADMIN)["data"]["tokenCreate"]["token"]
     limpiar(staff)
     app = ok(gql("""mutation { appCreate(input: {name: "poc-plantilla",
                     permissions: [HANDLE_CHECKOUTS, IMPERSONATE_USER, MANAGE_USERS, MANAGE_CHECKOUTS, MANAGE_SHIPPING]}) { authToken app { id } errors { message } } }""",
